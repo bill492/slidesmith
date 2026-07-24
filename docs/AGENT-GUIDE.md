@@ -1282,8 +1282,14 @@ slidesmith auth doctor
 The doctor reports OAuth client discovery and its exact source, direct Keychain
 readability (including the caught exception), file-store presence and token
 expiry, a verdict, and one next command. It distinguishes missing OAuth client
-credentials, denied/broken Keychain access, an absent session, and an expired
-session.
+credentials, `Keyring: DENIED OR BROKEN`, an absent session, and an expired
+session. A pending macOS authorization prompt instead reports `Keyring: TIMED
+OUT (likely awaiting a macOS Keychain authorization prompt)` with remediation:
+run doctor once interactively and click “Always Allow”, or set
+`SLIDESMITH_TOKEN_STORE=file`. It reports a timed-out gogcli client-secret read
+too; with that store selected it prints `Keyring session store: SKIPPED
+(SLIDESMITH_TOKEN_STORE=file)`. `KEYRING TIMED OUT` is the verdict only when no
+other usable authentication method exists.
 
 For gogcli, discovery checks the data directory before the config directory and
 supports both legacy full JSON and newer metadata-only `credentials.json` files.
@@ -1294,6 +1300,8 @@ found but the keyring secret cannot be read, doctor explains the macOS
 Keychain “Always Allow” prompt and offers `GOG_ACCESS_TOKEN` or
 `gog auth credentials <file> --insecure` (less secure). If multiple named
 clients exist without a default, doctor lists them and asks you to disambiguate.
+That client-secret lookup is still an OS-keyring operation even when
+`SLIDESMITH_TOKEN_STORE=file` is selected.
 
 `slidesmith auth login` always forces fresh browser consent. A refreshable
 login stores its refresh token in the OS keyring and
@@ -1333,18 +1341,31 @@ scopes. Run `slidesmith auth login` once to re-consent after upgrading to this
 scope set. Existing stored sessions issued with the previous broader scopes
 continue to work until they are refreshed.
 
-For an agent or subprocess that must avoid Keychain entirely:
+In a non-interactive process (stdin or stderr is not a TTY), every OS-keyring
+operation gives up after 5 seconds instead of hanging forever on a macOS
+Keychain authorization prompt; interactive terminals keep the unbounded wait
+so a human can respond. Session-store timeouts degrade gracefully to
+`~/.config/slidesmith/session.json`, so headless `pull` and `push` can proceed.
+Set `SLIDESMITH_KEYRING_TIMEOUT=<float-seconds>` to override the bound in either
+mode. Invalid values warn once on stderr and use the default; `0` or a negative
+value disables **all** keyring access, including gogcli client-secret discovery.
+
+To select the file session-token store for an agent or subprocess:
 
 ```bash
 SLIDESMITH_TOKEN_STORE=file slidesmith auth doctor
 SLIDESMITH_TOKEN_STORE=file slidesmith pull "<presentation-url-or-id>"
 ```
 
-Set `SLIDESMITH_TOKEN_STORE=keyring` to force Keychain reads. With no setting,
-Slidesmith tries Keychain and, on any Keychain exception, emits one stderr notice
-and falls back to the file. If the doctor says `CREDENTIAL ABSENT`, configure a
-gws or gogcli OAuth client first. For `GOGCLI CLIENT SECRET UNREADABLE`, use the
-printed keyring guidance or a bare token; for `GOGCLI CLIENT AMBIGUOUS`,
-disambiguate the named files. If it says `TOKEN EXPIRED`, `SESSION TOKEN ABSENT`,
-or `KEYRING DENIED OR BROKEN`, run `slidesmith auth login` from a
-browser-capable session and retry the agent command.
+`SLIDESMITH_TOKEN_STORE=file` selects the session-token store only; it does not
+disable gogcli client-secret discovery's bounded OS-keyring read. Use
+`SLIDESMITH_KEYRING_TIMEOUT=0` as the global “no Keychain” switch. Set
+`SLIDESMITH_TOKEN_STORE=keyring` to force Keychain session-store reads. With no
+setting, Slidesmith tries Keychain and, on an exception or timeout, emits one
+stderr notice and falls back to the file. If the doctor says `CREDENTIAL ABSENT`,
+configure a gws or gogcli OAuth client first. For `GOGCLI CLIENT SECRET
+UNREADABLE`, use the printed keyring guidance or a bare token; for `GOGCLI
+CLIENT AMBIGUOUS`, disambiguate the named files. If it says `TOKEN EXPIRED`,
+`SESSION TOKEN ABSENT`, `KEYRING TIMED OUT`, or `KEYRING DENIED OR BROKEN`, run
+`slidesmith auth login` from a browser-capable session and retry the agent
+command.

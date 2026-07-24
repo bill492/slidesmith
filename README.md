@@ -56,6 +56,14 @@ Local image uploads use the already-requested `drive.file` scope; uploaded,
 link-readable assets stay in your own Drive. Run `slidesmith auth doctor`
 anytime to see which method is active and whether it's healthy.
 
+In a non-interactive process, OS-keyring calls time out after 5 seconds rather
+than hanging on a macOS Keychain prompt; session tokens then fall back to the
+0600 file store so `pull` and `push` can continue. Set
+`SLIDESMITH_KEYRING_TIMEOUT` to a float-second override, or to `0` to disable
+all keyring access; invalid values warn once and use the normal default.
+`SLIDESMITH_TOKEN_STORE=file` selects only the session-token store—gogcli
+client-secret discovery can still make a bounded keyring read.
+
 ## The core loop
 
 ```bash

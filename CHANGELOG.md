@@ -14,7 +14,19 @@ agent-legible: name the command/flag and what an operator can now do.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- `SLIDESMITH_KEYRING_TIMEOUT=<float-seconds>` lets operators bound OS-keyring
+  calls in either terminal mode; set it to `0` (or negative) to disable all
+  Keychain access, and `slidesmith auth doctor` now identifies timed-out
+  Keychain and gogcli client-secret reads with headless remediation.
+
+### Fixed
+
+- `slidesmith pull` and `slidesmith push` no longer hang indefinitely in
+  headless macOS Keychain authorization prompts: non-interactive keyring calls
+  time out after 5 seconds and session-token operations fall back to the file
+  store.
 
 ## [0.9.1] — 2026-07-24 — Sequence-aware style planning
 

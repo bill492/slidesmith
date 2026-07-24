@@ -64,6 +64,12 @@ Newer gog versions may store only the OAuth client ID in `credentials.json` and
 keep the client secret in the OS keyring. `slidesmith auth doctor` checks both;
 if the keyring read is unavailable, follow its macOS Keychain guidance or use
 `GOG_ACCESS_TOKEN` / `gog auth credentials <file> --insecure` as a fallback.
+In a non-interactive process, keyring calls time out after 5 seconds instead of
+hanging on a Keychain prompt, and session-token operations fall back to the
+0600 file store. Set `SLIDESMITH_KEYRING_TIMEOUT=<float-seconds>` to override
+that bound, or `SLIDESMITH_KEYRING_TIMEOUT=0` to disable all keyring access;
+`SLIDESMITH_TOKEN_STORE=file` selects only the session store, not gogcli's
+bounded client-secret lookup.
 
 To create a slide, scaffold it locally with `slidesmith add-slide <id>`:
 `--after N` inserts after existing 1-based slide `N`, `--at N` inserts before

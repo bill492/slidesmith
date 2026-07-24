@@ -22,6 +22,11 @@ image or a throwaway `.pptx`.
   `credentials.json` and the client secret in the OS keyring. Otherwise a
   `GOG_ACCESS_TOKEN` env token or a service account (`SERVICE_ACCOUNT_PATH`)
   works.
+- In headless runs, OS-keyring calls time out after 5 seconds and session-token
+  operations fall back to `~/.config/slidesmith/session.json`. Override the
+  bound with `SLIDESMITH_KEYRING_TIMEOUT=<float-seconds>`; `0` disables all
+  keyring access. `SLIDESMITH_TOKEN_STORE=file` selects only the session store,
+  so gogcli client-secret discovery may still make a bounded keyring read.
 
 ## The core loop
 
