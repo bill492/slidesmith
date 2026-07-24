@@ -310,9 +310,9 @@ class FileSessionStore:
             return None
         try:
             token = SessionToken.from_dict(payload)
+            return token if token.is_valid() else None
         except (KeyError, TypeError, ValueError):
             return None
-        return token if token.is_valid() else None
 
     def save(self, profile_name: str, token: SessionToken) -> None:
         profiles = self._load_profiles()
@@ -331,7 +331,7 @@ class FileSessionStore:
 
 
 class FallbackSessionStore:
-    """Read keyring first and fall back to a file after any keyring error."""
+    """Read both persistent stores and return the newest valid session."""
 
     def __init__(
         self,
@@ -353,13 +353,16 @@ class FallbackSessionStore:
 
     def load(self, profile_name: str) -> SessionToken | None:
         try:
-            token = self.keyring_store.load(profile_name)
+            keyring_token = self.keyring_store.load(profile_name)
         except Exception as exc:
             self._notice(exc)
             return self.file_store.load(profile_name)
-        if token is not None:
-            return token
-        return self.file_store.load(profile_name)
+        file_token = self.file_store.load(profile_name)
+        if keyring_token is None:
+            return file_token
+        if file_token is None or keyring_token.expires_at >= file_token.expires_at:
+            return keyring_token
+        return file_token
 
     def save(self, profile_name: str, token: SessionToken) -> None:
         keyring_saved = False

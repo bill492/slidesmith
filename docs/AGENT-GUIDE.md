@@ -1287,7 +1287,9 @@ session. A pending macOS authorization prompt instead reports `Keyring: TIMED
 OUT (likely awaiting a macOS Keychain authorization prompt)` with remediation:
 run doctor once interactively and click “Always Allow”, or set
 `SLIDESMITH_TOKEN_STORE=file`. It reports a timed-out gogcli client-secret read
-too; with that store selected it prints `Keyring session store: SKIPPED
+too, with remediation to run doctor once interactively and click “Always Allow”;
+`SLIDESMITH_TOKEN_STORE=file` is not a client-secret fallback. With that store
+selected it prints `Keyring session store: SKIPPED
 (SLIDESMITH_TOKEN_STORE=file)`. `KEYRING TIMED OUT` is the verdict only when no
 other usable authentication method exists.
 

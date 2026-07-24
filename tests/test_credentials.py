@@ -396,6 +396,129 @@ def test_keyring_timeout_keeps_newer_save_after_stale_save(
     assert json.loads(values[("extrasuite", "default")]) == newer_token.to_dict()
 
 
+@pytest.mark.parametrize(
+    ("keyring_expires_at", "file_expires_at", "expected"),
+    [
+        (7200.0, 3600.0, "keyring"),
+        (3600.0, 7200.0, "file"),
+        (7200.0, 7200.0, "keyring"),
+    ],
+)
+def test_fallback_session_store_load_prefers_newest_token(
+    keyring_expires_at: float,
+    file_expires_at: float,
+    expected: str,
+) -> None:
+    base_expires_at = time.time()
+    keyring_token = SessionToken(
+        raw_token="keyring-token",
+        email="keyring@example.com",
+        expires_at=base_expires_at + keyring_expires_at,
+    )
+    file_token = SessionToken(
+        raw_token="file-token",
+        email="file@example.com",
+        expires_at=base_expires_at + file_expires_at,
+    )
+    keyring_store = InMemorySessionStore()
+    file_store = InMemorySessionStore()
+    keyring_store.save("default", keyring_token)
+    file_store.save("default", file_token)
+
+    loaded = FallbackSessionStore(keyring_store, file_store).load("default")
+
+    assert loaded is (keyring_token if expected == "keyring" else file_token)
+
+
+def test_fallback_load_ignores_malformed_file_expiry(tmp_path: Path) -> None:
+    keyring_token = _token()
+    keyring_store = InMemorySessionStore()
+    keyring_store.save("default", keyring_token)
+    file_store = FileSessionStore(tmp_path / "session.json")
+    file_store.path.write_text(
+        json.dumps(
+            {
+                "profiles": {
+                    "default": {
+                        "raw_token": "file-token",
+                        "email": "file@example.com",
+                        "expires_at": "not-a-number",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert FallbackSessionStore(keyring_store, file_store).load("default") == keyring_token
+
+
+def test_fallback_load_repairs_stale_keyring_after_timed_out_new_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_save_started = threading.Event()
+    release_first_save = threading.Event()
+    first_save_finished = threading.Event()
+    values: dict[tuple[str, str], str] = {}
+
+    class BlockingFirstSaveKeyring:
+        def get_password(self, service: str, profile: str) -> str | None:
+            return values.get((service, profile))
+
+        def set_password(self, service: str, profile: str, value: str) -> None:
+            if not first_save_started.is_set():
+                first_save_started.set()
+                release_first_save.wait()
+                values[(service, profile)] = value
+                first_save_finished.set()
+                return
+            values[(service, profile)] = value
+
+        def delete_password(self, service: str, profile: str) -> None:
+            values.pop((service, profile), None)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SLIDESMITH_KEYRING_TIMEOUT", "0.05")
+    monkeypatch.setattr(credentials, "_KEYRING_AVAILABLE", True)
+    monkeypatch.setattr(credentials, "_keyring", BlockingFirstSaveKeyring())
+
+    stale_token = SessionToken(
+        raw_token="old-token",
+        email="old@example.com",
+        expires_at=time.time() + 3600,
+    )
+    new_token = SessionToken(
+        raw_token="new-token",
+        email="new@example.com",
+        expires_at=time.time() + 7200,
+    )
+    file_store = FileSessionStore()
+    store = FallbackSessionStore(KeyringSessionStore(), file_store)
+
+    try:
+        store.save("default", stale_token)
+        assert first_save_started.is_set()
+
+        store.save("default", new_token)
+        assert file_store.load("default") == new_token
+    finally:
+        release_first_save.set()
+
+    assert first_save_finished.wait(0.5)
+    stale_payload = values[("extrasuite", "default")]
+    assert json.loads(stale_payload) == stale_token.to_dict()
+
+    loaded = store.load("default")
+    assert loaded == new_token
+
+    manager = CredentialsManager(server_url="https://auth.example")
+    manager._mirror_loaded_session_token("default", loaded)
+
+    repaired_payload = values[("extrasuite", "default")]
+    assert json.loads(repaired_payload) == new_token.to_dict()
+
+
 def test_keyring_guard_does_not_timeout_for_interactive_streams(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

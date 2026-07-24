@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -190,6 +191,51 @@ def test_keyring_timeout_is_reported_in_gogcli_remediation(
     assert "keyring read timed out" in output
     assert "macOS Keychain authorization prompt is pending" in output
     assert "run `slidesmith auth doctor` once in an interactive terminal" in output
+    assert isolated_auth.calls == []
+
+
+def test_gogcli_timeout_does_not_recommend_session_store_fallback(
+    tmp_path: Path,
+    isolated_auth: FakeKeyring,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.setenv("GOG_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("SLIDESMITH_KEYRING_TIMEOUT", "0.01")
+    monkeypatch.setenv("SLIDESMITH_TOKEN_STORE", "file")
+    _write(data_dir / "credentials.json", _metadata())
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingKeyring(FakeKeyring):
+        def get_password(self, service: str, key: str) -> None:
+            self.calls.append((service, key))
+            started.set()
+            release.wait()
+            return None
+
+    blocking_keyring = BlockingKeyring()
+    monkeypatch.setattr(credentials, "_keyring", blocking_keyring)
+    try:
+        output = "\n".join(
+            auth_doctor_lines(
+                find_gws_client_credentials=lambda: None,
+                probe_bare_token=lambda _token: ("unreachable", None),
+            )
+        )
+        assert started.is_set()
+    finally:
+        release.set()
+
+    assert "keyring read timed out" in output
+    assert (
+        "Remediation: run `slidesmith auth doctor` once in an interactive terminal "
+        "and click 'Always Allow'."
+    ) in output
+    assert "or set SLIDESMITH_TOKEN_STORE=file" not in output
+    assert output.count("SLIDESMITH_TOKEN_STORE=file") == 1
+    assert "Keyring session store: SKIPPED (SLIDESMITH_TOKEN_STORE=file)" in output
     assert isolated_auth.calls == []
 
 

@@ -38,6 +38,10 @@ _KEYRING_TIMEOUT_REMEDIATION = (
     "Remediation: run `slidesmith auth doctor` once in an interactive terminal and "
     "click 'Always Allow', or set SLIDESMITH_TOKEN_STORE=file."
 )
+_GOGCLI_KEYRING_TIMEOUT_REMEDIATION = (
+    "Remediation: run `slidesmith auth doctor` once in an interactive terminal and "
+    "click 'Always Allow'."
+)
 
 
 def _inspect_session_payload(payload: Any) -> tuple[str, SessionToken | None]:
@@ -154,7 +158,7 @@ def auth_doctor_lines(
                 "The keyring read timed out, likely because a macOS Keychain "
                 "authorization prompt is pending."
             )
-            lines.append(_KEYRING_TIMEOUT_REMEDIATION)
+            lines.append(_GOGCLI_KEYRING_TIMEOUT_REMEDIATION)
         lines.append(
             "If gog uses a custom keyring service, set "
             "GOG_KEYRING_SERVICE_NAME to the same value."
