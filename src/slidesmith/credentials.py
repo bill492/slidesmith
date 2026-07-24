@@ -56,6 +56,7 @@ from slidesmith.auth.stores import (
     _DEFAULT_PROFILE,  # noqa: F401
     _KEYRING_AVAILABLE,  # noqa: F401
     _KEYRING_SERVICE,  # noqa: F401
+    _is_strictly_newer,
     _keyring,  # noqa: F401
     _write_secure_json,  # noqa: F401
 )
@@ -415,7 +416,7 @@ class CredentialsManager(BrowserFlowMixin):
                 existing = store.load(profile_name)
             except Exception:
                 existing = None
-            if existing is not None and existing.expires_at >= token.expires_at:
+            if existing is not None and not _is_strictly_newer(token, existing):
                 continue
             try:
                 store.save(profile_name, token)
@@ -542,6 +543,7 @@ class CredentialsManager(BrowserFlowMixin):
                     else expires_at
                 ),
                 is_refreshable=bool(refresh_token),
+                issued_at=time.time(),
             )
             self._save_session_token(session, profile_name)
             return session
@@ -669,6 +671,7 @@ class CredentialsManager(BrowserFlowMixin):
                     else expires_at
                 ),
                 is_refreshable=bool(refresh_token),
+                issued_at=time.time(),
             ),
             profile,
         )
@@ -786,6 +789,7 @@ class CredentialsManager(BrowserFlowMixin):
             raw_token=result["session_token"],
             email=result["email"],
             expires_at=expires_at_dt.timestamp(),
+            issued_at=time.time(),
         )
         self._save_session_token(session, name)
         return session

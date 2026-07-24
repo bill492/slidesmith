@@ -167,6 +167,62 @@ def test_file_session_store_round_trip_and_mode_0600(tmp_path: Path) -> None:
     assert data["profiles"]["default"] == token.to_dict()
 
 
+def test_session_token_issued_at_round_trips_and_legacy_payload_defaults_none() -> None:
+    token = SessionToken(
+        raw_token="refresh-token",
+        email="agent@example.com",
+        expires_at=1_700_000_000.0 + 30 * 86400,
+        issued_at=1_700_000_000.0,
+    )
+
+    payload = token.to_dict()
+    assert payload["issued_at"] == token.issued_at
+    assert SessionToken.from_dict(payload) == token
+
+    legacy_payload = {
+        "raw_token": "legacy-refresh-token",
+        "email": "agent@example.com",
+        "expires_at": 1_700_000_000.0 + 30 * 86400,
+    }
+    legacy_token = SessionToken.from_dict(legacy_payload)
+    assert legacy_token.issued_at is None
+    assert "issued_at" not in legacy_token.to_dict()
+
+
+@pytest.mark.parametrize("issued_at", [True, float("nan")])
+def test_session_token_from_dict_sanitizes_invalid_issued_at(issued_at: object) -> None:
+    token = SessionToken.from_dict(
+        {
+            "raw_token": "refresh-token",
+            "email": "agent@example.com",
+            "expires_at": 1_700_000_000.0 + 30 * 86400,
+            "issued_at": issued_at,
+        }
+    )
+
+    assert token.issued_at is None
+    assert "issued_at" not in token.to_dict()
+
+
+def test_fallback_load_ignores_oversized_file_issued_at(tmp_path: Path) -> None:
+    payload = {
+        "raw_token": "file-token",
+        "email": "file@example.com",
+        "expires_at": time.time() + 7200,
+        "issued_at": 10**1000,
+    }
+    file_store = FileSessionStore(tmp_path / "session.json")
+    file_store.path.write_text(
+        json.dumps({"profiles": {"default": payload}}), encoding="utf-8"
+    )
+    keyring_token = _token()
+    keyring_store = InMemorySessionStore()
+    keyring_store.save("default", keyring_token)
+
+    assert SessionToken.from_dict(payload).issued_at is None
+    assert FallbackSessionStore(keyring_store, file_store).load("default") is keyring_token
+
+
 def test_file_session_store_does_not_double_close_after_managed_write_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -428,6 +484,118 @@ def test_fallback_session_store_load_prefers_newest_token(
     loaded = FallbackSessionStore(keyring_store, file_store).load("default")
 
     assert loaded is (keyring_token if expected == "keyring" else file_token)
+
+
+def test_fallback_load_treats_malformed_keyring_issued_at_as_unstamped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keyring = MemoryKeyring()
+    monkeypatch.setattr(credentials, "_KEYRING_AVAILABLE", True)
+    monkeypatch.setattr(credentials, "_keyring", keyring)
+    now = time.time()
+    keyring.values[("extrasuite", "default")] = json.dumps(
+        {
+            "raw_token": "keyring-token",
+            "email": "keyring@example.com",
+            "expires_at": now + 3600,
+            "issued_at": "1700000000",
+        }
+    )
+    file_token = SessionToken(
+        raw_token="file-token",
+        email="file@example.com",
+        expires_at=now + 7200,
+        issued_at=1_700_000_001.0,
+    )
+    file_store = FileSessionStore(tmp_path / "session.json")
+    file_store.save("default", file_token)
+    keyring_store = KeyringSessionStore()
+    keyring_token = keyring_store.load("default")
+
+    assert keyring_token is not None
+    assert keyring_token.issued_at is None
+
+    loaded = FallbackSessionStore(keyring_store, file_store).load("default")
+
+    assert loaded == file_token
+
+
+@pytest.mark.parametrize(
+    ("fresh_store_name", "stale_store_name"),
+    [("keyring", "file"), ("file", "keyring")],
+)
+def test_fallback_and_mirror_prefer_fresh_access_only_session_over_stale_refreshable(
+    fresh_store_name: str,
+    stale_store_name: str,
+) -> None:
+    now = time.time()
+    fresh_token = SessionToken(
+        access_token="fresh-access-token",
+        email="",
+        expires_at=now + 2700,
+        is_refreshable=False,
+    )
+    stale_issued_at = now - 60
+    stale_token = SessionToken(
+        raw_token="stale-refresh-token",
+        email="",
+        expires_at=stale_issued_at + 30 * 86400,
+    )
+    stores = {
+        "keyring": InMemorySessionStore(),
+        "file": InMemorySessionStore(),
+    }
+    stores[fresh_store_name].save("default", fresh_token)
+    stores[stale_store_name].save("default", stale_token)
+
+    manager = object.__new__(CredentialsManager)
+    manager._auth_mode = "oauth_client"
+    manager._session_store_injected = False
+    manager._keyring_session_store = stores["keyring"]
+    manager._file_session_store = stores["file"]
+    manager._session_store = FallbackSessionStore(
+        stores["keyring"], stores["file"]
+    )
+
+    loaded = manager._load_session_token("default")
+
+    assert loaded is fresh_token
+    assert stores[fresh_store_name].load("default") is fresh_token
+    assert stores[stale_store_name].load("default") is stale_token
+
+
+def test_fallback_legacy_refreshable_race_prefers_access_only_and_skips_mirror() -> None:
+    now = time.time()
+    access_issued_at = now - 1200
+    access_token = SessionToken(
+        access_token="valid-access-token",
+        email="",
+        expires_at=access_issued_at + 2700,
+        is_refreshable=False,
+    )
+    refresh_issued_at = now - 60
+    refresh_token = SessionToken(
+        raw_token="newer-refresh-token",
+        email="",
+        expires_at=refresh_issued_at + 30 * 86400,
+    )
+    keyring_store = InMemorySessionStore()
+    file_store = InMemorySessionStore()
+    keyring_store.save("default", refresh_token)
+    file_store.save("default", access_token)
+
+    manager = object.__new__(CredentialsManager)
+    manager._auth_mode = "oauth_client"
+    manager._session_store_injected = False
+    manager._keyring_session_store = keyring_store
+    manager._file_session_store = file_store
+    manager._session_store = FallbackSessionStore(keyring_store, file_store)
+
+    loaded = manager._load_session_token("default")
+
+    assert loaded is access_token
+    assert keyring_store.load("default") is refresh_token
+    assert file_store.load("default") is access_token
 
 
 def test_fallback_load_ignores_malformed_file_expiry(tmp_path: Path) -> None:

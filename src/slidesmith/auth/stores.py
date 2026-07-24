@@ -167,6 +167,7 @@ class SessionToken:
     expires_at: float = 0.0
     is_refreshable: bool = True
     access_token: str | None = None
+    issued_at: float | None = None
 
     def __post_init__(self) -> None:
         # Accept the earlier in-progress access-only object shape in memory,
@@ -185,6 +186,8 @@ class SessionToken:
             "expires_at": self.expires_at,
             "is_refreshable": self.is_refreshable,
         }
+        if self.issued_at is not None:
+            payload["issued_at"] = self.issued_at
         if self.is_refreshable:
             payload["raw_token"] = self.raw_token
         else:
@@ -196,6 +199,16 @@ class SessionToken:
         """Create SessionToken from dictionary."""
         if not isinstance(data, dict):
             raise TypeError("session token payload must be an object")
+        issued_at = data.get("issued_at")
+        try:
+            if (
+                isinstance(issued_at, bool)
+                or not isinstance(issued_at, (int, float))
+                or not math.isfinite(issued_at)
+            ):
+                issued_at = None
+        except (OverflowError, ValueError):
+            issued_at = None
         is_refreshable = data.get("is_refreshable", True)
         if not isinstance(is_refreshable, bool):
             raise TypeError("is_refreshable must be a boolean")
@@ -205,6 +218,7 @@ class SessionToken:
                 email=data["email"],
                 expires_at=data["expires_at"],
                 is_refreshable=True,
+                issued_at=issued_at,
             )
         if "access_token" in data:
             return cls(
@@ -212,6 +226,7 @@ class SessionToken:
                 email=data["email"],
                 expires_at=data["expires_at"],
                 is_refreshable=False,
+                issued_at=issued_at,
             )
         # Read the short-lived shape emitted by the earlier Phase 5 draft too.
         return cls(
@@ -219,7 +234,28 @@ class SessionToken:
             email=data["email"],
             expires_at=data["expires_at"],
             is_refreshable=False,
+            issued_at=issued_at,
         )
+
+
+def _compare_sessions(a: SessionToken, b: SessionToken) -> int | None:
+    """Compare session recency, returning ``None`` when it is ambiguous.
+
+    Stamped tokens have exact issuance ordering. For legacy tokens, expiry is
+    only a safe ordering signal within the same refreshability type; a
+    cross-type pair with a missing stamp cannot be ordered safely.
+    """
+    if a.issued_at is not None and b.issued_at is not None:
+        return (a.issued_at > b.issued_at) - (a.issued_at < b.issued_at)
+    if a.is_refreshable == b.is_refreshable:
+        return (a.expires_at > b.expires_at) - (a.expires_at < b.expires_at)
+    return None
+
+
+def _is_strictly_newer(candidate: SessionToken, existing: SessionToken) -> bool:
+    """Return whether ``candidate`` is unambiguously newer than ``existing``."""
+    comparison = _compare_sessions(candidate, existing)
+    return comparison is not None and comparison > 0
 
 
 class SessionStore(Protocol):
@@ -352,6 +388,15 @@ class FallbackSessionStore:
         )
 
     def load(self, profile_name: str) -> SessionToken | None:
+        """Load a valid session, preferring access-only on ambiguous legacy pairs.
+
+        Each store's ``load()`` already drops invalid tokens, so a surviving
+        access-only token is provably less than about one hour old, while a
+        refreshable token may be up to 30 days old. If a refreshable token is
+        actually newer in that sub-hour race, both tokens still work; leaving
+        the refreshable copy in its store lets ordering self-correct when the
+        access-only token expires.
+        """
         try:
             keyring_token = self.keyring_store.load(profile_name)
         except Exception as exc:
@@ -360,9 +405,16 @@ class FallbackSessionStore:
         file_token = self.file_store.load(profile_name)
         if keyring_token is None:
             return file_token
-        if file_token is None or keyring_token.expires_at >= file_token.expires_at:
+        if file_token is None:
             return keyring_token
-        return file_token
+        comparison = _compare_sessions(keyring_token, file_token)
+        if comparison is None:
+            return (
+                keyring_token
+                if not keyring_token.is_refreshable
+                else file_token
+            )
+        return keyring_token if comparison >= 0 else file_token
 
     def save(self, profile_name: str, token: SessionToken) -> None:
         keyring_saved = False
