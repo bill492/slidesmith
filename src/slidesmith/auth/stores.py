@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import stat
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from slidesmith.engine.json_utils import read_json
 
@@ -25,6 +27,108 @@ except ImportError:
 
 _KEYRING_SERVICE = "extrasuite"
 _DEFAULT_PROFILE = "default"
+_KEYRING_TIMEOUT_ENV = "SLIDESMITH_KEYRING_TIMEOUT"
+_DEFAULT_NONINTERACTIVE_KEYRING_TIMEOUT = 5.0
+_KEYRING_TIMEOUT_MESSAGE = (
+    "keyring operation timed out; a macOS Keychain authorization prompt is likely "
+    "pending"
+)
+_keyring_locks: dict[tuple[str, str], threading.Lock] = {}
+_keyring_locks_guard = threading.Lock()
+_invalid_timeout_warnings: set[str] = set()
+_invalid_timeout_warnings_lock = threading.Lock()
+
+
+class KeyringTimeoutError(RuntimeError):
+    """An OS keyring operation exceeded its configured headless bound."""
+
+    def __init__(self) -> None:
+        super().__init__(_KEYRING_TIMEOUT_MESSAGE)
+
+
+def _warn_invalid_keyring_timeout(value: str) -> None:
+    with _invalid_timeout_warnings_lock:
+        if value in _invalid_timeout_warnings:
+            return
+        _invalid_timeout_warnings.add(value)
+    print(
+        f"warning: ignoring invalid {_KEYRING_TIMEOUT_ENV}={value!r}; "
+        "using the default keyring timeout",
+        file=sys.stderr,
+    )
+
+
+def _keyring_timeout() -> float | None:
+    """Resolve the per-call keyring bound, with interactive compatibility."""
+    configured = os.environ.get(_KEYRING_TIMEOUT_ENV)
+    if configured is not None:
+        try:
+            timeout = float(configured)
+        except (TypeError, ValueError):
+            _warn_invalid_keyring_timeout(configured)
+        else:
+            if math.isfinite(timeout):
+                return timeout
+            _warn_invalid_keyring_timeout(configured)
+
+    try:
+        interactive = bool(sys.stdin.isatty() and sys.stderr.isatty())
+    except (AttributeError, OSError):
+        interactive = False
+    return None if interactive else _DEFAULT_NONINTERACTIVE_KEYRING_TIMEOUT
+
+
+def _call_keyring(
+    operation: Callable[[], Any], *, key: tuple[str, str] | None = None
+) -> Any:
+    """Run one keyring operation without unbounded headless blocking."""
+    timeout = _keyring_timeout()
+    if timeout is not None and timeout <= 0:
+        raise KeyringTimeoutError()
+
+    lock: threading.Lock | None = None
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    if key is not None:
+        with _keyring_locks_guard:
+            lock = _keyring_locks.setdefault(key, threading.Lock())
+        if deadline is None:
+            lock.acquire()
+        else:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not lock.acquire(timeout=remaining):
+                raise KeyringTimeoutError()
+
+    result: list[Any] = []
+    error: list[BaseException] = []
+
+    def invoke() -> None:
+        try:
+            result.append(operation())
+        except BaseException as exc:
+            error.append(exc)
+        finally:
+            if lock is not None:
+                lock.release()
+
+    worker = threading.Thread(target=invoke, daemon=True)
+    worker_owns_lock = False
+    try:
+        worker.start()
+        worker_owns_lock = lock is not None
+        if deadline is None:
+            worker.join()
+        else:
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                worker.join(remaining)
+        if worker.is_alive():
+            raise KeyringTimeoutError()
+        if error:
+            raise error[0]
+        return result[0]
+    finally:
+        if lock is not None and not worker_owns_lock:
+            lock.release()
 
 
 def _write_secure_json(path: Path, data: dict[str, Any]) -> None:
@@ -140,7 +244,10 @@ class KeyringSessionStore:
         return backend
 
     def load(self, profile_name: str) -> SessionToken | None:
-        raw = self._backend().get_password(_KEYRING_SERVICE, profile_name)
+        raw = _call_keyring(
+            lambda: self._backend().get_password(_KEYRING_SERVICE, profile_name),
+            key=(_KEYRING_SERVICE, profile_name),
+        )
         if not raw:
             return None
         try:
@@ -152,12 +259,18 @@ class KeyringSessionStore:
             return None
 
     def save(self, profile_name: str, token: SessionToken) -> None:
-        self._backend().set_password(
-            _KEYRING_SERVICE, profile_name, json.dumps(token.to_dict())
+        _call_keyring(
+            lambda: self._backend().set_password(
+                _KEYRING_SERVICE, profile_name, json.dumps(token.to_dict())
+            ),
+            key=(_KEYRING_SERVICE, profile_name),
         )
 
     def delete(self, profile_name: str) -> None:
-        self._backend().delete_password(_KEYRING_SERVICE, profile_name)
+        _call_keyring(
+            lambda: self._backend().delete_password(_KEYRING_SERVICE, profile_name),
+            key=(_KEYRING_SERVICE, profile_name),
+        )
 
 
 class FileSessionStore:

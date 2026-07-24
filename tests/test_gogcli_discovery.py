@@ -168,6 +168,31 @@ def test_keyring_error_is_unreadable_and_doctor_is_actionable(
     assert "CREDENTIAL ABSENT" not in output
 
 
+def test_keyring_timeout_is_reported_in_gogcli_remediation(
+    tmp_path: Path,
+    isolated_auth: FakeKeyring,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.setenv("GOG_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("SLIDESMITH_KEYRING_TIMEOUT", "0")
+    _write(data_dir / "credentials.json", _metadata())
+
+    result = discovery._inspect_gogcli_client_credentials()
+    lines = auth_doctor_lines(
+        find_gws_client_credentials=lambda: None,
+        probe_bare_token=lambda _token: ("unreachable", None),
+    )
+    output = "\n".join(lines)
+
+    assert result.status == "keyring-unreadable"
+    assert result.keyring_timed_out
+    assert "keyring read timed out" in output
+    assert "macOS Keychain authorization prompt is pending" in output
+    assert "run `slidesmith auth doctor` once in an interactive terminal" in output
+    assert isolated_auth.calls == []
+
+
 def test_unreadable_keyring_does_not_make_valid_gogcli_session_runtime_auth(
     tmp_path: Path,
     isolated_auth: FakeKeyring,

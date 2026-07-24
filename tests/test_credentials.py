@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import stat
 import sys
+import threading
 import time
 import types
 import webbrowser
@@ -27,6 +28,7 @@ from slidesmith.credentials import (
     OAuthClientCredentials,
     SessionToken,
 )
+from slidesmith.auth.stores import KeyringTimeoutError
 
 
 class MemoryKeyring:
@@ -251,6 +253,254 @@ def test_keyring_failure_falls_back_once_to_file_store(
     stderr = capsys.readouterr().err
     assert stderr.count("using file session store") == 1
     assert "Unknown Error" in stderr
+
+
+def test_keyring_guard_times_out_blocking_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    released = threading.Event()
+    started = threading.Event()
+
+    class BlockingKeyring:
+        def get_password(self, _service: str, _profile: str) -> None:
+            started.set()
+            released.wait()
+            return None
+
+    monkeypatch.setattr(credentials, "_KEYRING_AVAILABLE", True)
+    monkeypatch.setattr(credentials, "_keyring", BlockingKeyring())
+    monkeypatch.setenv("SLIDESMITH_KEYRING_TIMEOUT", "0.01")
+
+    try:
+        with pytest.raises(
+            KeyringTimeoutError,
+            match="macOS Keychain authorization prompt is likely pending",
+        ):
+            KeyringSessionStore().load("default")
+        assert started.is_set()
+    finally:
+        released.set()
+
+
+def test_keyring_timeout_keeps_late_delete_before_new_save(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delete_started = threading.Event()
+    release_delete = threading.Event()
+    save_finished = threading.Event()
+    values = {("extrasuite", "default"): "existing-token"}
+
+    class BlockingDeleteKeyring:
+        def get_password(self, service: str, profile: str) -> str | None:
+            return values.get((service, profile))
+
+        def set_password(self, service: str, profile: str, value: str) -> None:
+            values[(service, profile)] = value
+
+        def delete_password(self, service: str, profile: str) -> None:
+            delete_started.set()
+            release_delete.wait()
+            values.pop((service, profile), None)
+
+    monkeypatch.setattr(credentials, "_KEYRING_AVAILABLE", True)
+    monkeypatch.setattr(credentials, "_keyring", BlockingDeleteKeyring())
+    monkeypatch.setenv("SLIDESMITH_KEYRING_TIMEOUT", "0.05")
+
+    store = KeyringSessionStore()
+    with pytest.raises(KeyringTimeoutError):
+        store.delete("default")
+    assert delete_started.is_set()
+
+    token = _token()
+    save_errors: list[BaseException] = []
+
+    def save_new_token() -> None:
+        try:
+            store.save("default", token)
+        except BaseException as exc:
+            save_errors.append(exc)
+        finally:
+            save_finished.set()
+
+    saver = threading.Thread(target=save_new_token, daemon=True)
+    saver.start()
+    try:
+        assert not save_finished.wait(0.01)
+        release_delete.set()
+        assert save_finished.wait(0.2)
+    finally:
+        release_delete.set()
+        saver.join(0.2)
+
+    assert save_errors == []
+    assert json.loads(values[("extrasuite", "default")]) == token.to_dict()
+
+
+def test_keyring_timeout_keeps_newer_save_after_stale_save(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_save_started = threading.Event()
+    release_first_save = threading.Event()
+    second_save_finished = threading.Event()
+    values: dict[tuple[str, str], str] = {}
+
+    class BlockingFirstSaveKeyring:
+        def get_password(self, service: str, profile: str) -> str | None:
+            return values.get((service, profile))
+
+        def set_password(self, service: str, profile: str, value: str) -> None:
+            if not first_save_started.is_set():
+                first_save_started.set()
+                release_first_save.wait()
+            values[(service, profile)] = value
+
+        def delete_password(self, service: str, profile: str) -> None:
+            values.pop((service, profile), None)
+
+    monkeypatch.setattr(credentials, "_KEYRING_AVAILABLE", True)
+    monkeypatch.setattr(credentials, "_keyring", BlockingFirstSaveKeyring())
+    monkeypatch.setenv("SLIDESMITH_KEYRING_TIMEOUT", "0.05")
+
+    store = KeyringSessionStore()
+    stale_token = _token()
+    with pytest.raises(KeyringTimeoutError):
+        store.save("default", stale_token)
+    assert first_save_started.is_set()
+
+    newer_token = SessionToken(
+        raw_token="newer-token",
+        email="newer@example.com",
+        expires_at=time.time() + 86400,
+    )
+    save_errors: list[BaseException] = []
+
+    def save_newer_token() -> None:
+        try:
+            store.save("default", newer_token)
+        except BaseException as exc:
+            save_errors.append(exc)
+        finally:
+            second_save_finished.set()
+
+    saver = threading.Thread(target=save_newer_token, daemon=True)
+    saver.start()
+    try:
+        assert not second_save_finished.wait(0.01)
+        release_first_save.set()
+        assert second_save_finished.wait(0.2)
+    finally:
+        release_first_save.set()
+        saver.join(0.2)
+
+    assert save_errors == []
+    assert json.loads(values[("extrasuite", "default")]) == newer_token.to_dict()
+
+
+def test_keyring_guard_does_not_timeout_for_interactive_streams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    released = threading.Event()
+    started = threading.Event()
+
+    class BlockingKeyring:
+        def get_password(self, _service: str, _profile: str) -> None:
+            started.set()
+            released.wait()
+            return None
+
+    class TTY:
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.delenv("SLIDESMITH_KEYRING_TIMEOUT", raising=False)
+    monkeypatch.setattr(credentials, "_KEYRING_AVAILABLE", True)
+    monkeypatch.setattr(credentials, "_keyring", BlockingKeyring())
+    monkeypatch.setattr(sys, "stdin", TTY())
+    monkeypatch.setattr(sys, "stderr", TTY())
+
+    result: list[SessionToken | None] = []
+    errors: list[BaseException] = []
+
+    def load() -> None:
+        try:
+            result.append(KeyringSessionStore().load("default"))
+        except BaseException as exc:
+            errors.append(exc)
+
+    caller = threading.Thread(target=load, daemon=True)
+    caller.start()
+    try:
+        assert started.wait(0.5)
+        time.sleep(0.05)
+        assert caller.is_alive()
+    finally:
+        released.set()
+        caller.join(0.5)
+
+    assert not caller.is_alive()
+    assert errors == []
+    assert result == [None]
+
+
+@pytest.mark.parametrize("timeout", ["0", "-1"])
+def test_keyring_timeout_nonpositive_skips_backend_call(
+    monkeypatch: pytest.MonkeyPatch, timeout: str
+) -> None:
+    calls = 0
+
+    class CountingKeyring:
+        def get_password(self, _service: str, _profile: str) -> None:
+            nonlocal calls
+            calls += 1
+            return None
+
+    monkeypatch.setattr(credentials, "_KEYRING_AVAILABLE", True)
+    monkeypatch.setattr(credentials, "_keyring", CountingKeyring())
+    monkeypatch.setenv("SLIDESMITH_KEYRING_TIMEOUT", timeout)
+
+    with pytest.raises(KeyringTimeoutError):
+        KeyringSessionStore().load("default")
+
+    assert calls == 0
+
+
+def test_invalid_keyring_timeout_warns_once_and_uses_default(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(credentials, "_KEYRING_AVAILABLE", True)
+    monkeypatch.setattr(credentials, "_keyring", MemoryKeyring())
+    monkeypatch.setenv("SLIDESMITH_KEYRING_TIMEOUT", "not-a-number-for-test")
+
+    store = KeyringSessionStore()
+    assert store.load("default") is None
+    assert store.load("default") is None
+
+    stderr = capsys.readouterr().err
+    assert stderr.count("ignoring invalid SLIDESMITH_KEYRING_TIMEOUT") == 1
+
+
+def test_fallback_session_store_uses_file_after_keyring_timeout(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    token = _token()
+
+    class TimedOutStore:
+        def load(self, _profile_name: str) -> SessionToken | None:
+            raise KeyringTimeoutError()
+
+        def save(self, _profile_name: str, _token: SessionToken) -> None:
+            raise KeyringTimeoutError()
+
+        def delete(self, _profile_name: str) -> None:
+            raise KeyringTimeoutError()
+
+    file_store = FileSessionStore(tmp_path / "session.json")
+    file_store.save("default", token)
+
+    store = FallbackSessionStore(TimedOutStore(), file_store)
+
+    assert store.load("default") == token
+    assert "using file session store" in capsys.readouterr().err
 
 
 def test_empty_keyring_falls_back_to_file_and_repairs_keyring(
@@ -617,6 +867,99 @@ def test_auth_doctor_shows_keyring_error_and_recovery_command(
     assert "Unknown Error" in output
     assert "Verdict: KEYRING DENIED OR BROKEN" in output
     assert "Next command: slidesmith auth login" in output
+
+
+def test_auth_doctor_reports_keyring_timeout_remediation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _doctor_setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("SLIDESMITH_KEYRING_TIMEOUT", "0")
+
+    cli.main(["auth", "doctor"])
+
+    output = capsys.readouterr().out
+    assert (
+        "Keyring: TIMED OUT (likely awaiting a macOS Keychain authorization prompt)"
+        in output
+    )
+    assert "run `slidesmith auth doctor` once in an interactive terminal" in output
+    assert "set SLIDESMITH_TOKEN_STORE=file" in output
+    assert "Verdict: KEYRING TIMED OUT" in output
+    assert "Verdict: KEYRING DENIED OR BROKEN" not in output
+
+
+def test_auth_doctor_keeps_valid_bare_token_verdict_over_keyring_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _doctor_setup(tmp_path, monkeypatch, oauth=False)
+    monkeypatch.setenv("SLIDESMITH_KEYRING_TIMEOUT", "0")
+    monkeypatch.setenv("GOG_ACCESS_TOKEN", "valid-token")
+    monkeypatch.setattr(
+        credentials, "_probe_bare_token", lambda _token: ("valid", time.time() + 1800)
+    )
+
+    cli.main(["auth", "doctor"])
+
+    output = capsys.readouterr().out
+    assert "Verdict: READY (valid; expires in approximately" in output
+    assert "Verdict: KEYRING TIMED OUT" not in output
+
+
+def test_auth_doctor_keeps_valid_file_session_verdict_over_keyring_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _doctor_setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("SLIDESMITH_KEYRING_TIMEOUT", "0")
+    FileSessionStore().save("gws-default", _token())
+
+    cli.main(["auth", "doctor"])
+
+    output = capsys.readouterr().out
+    assert "File store: PRESENT" in output
+    assert "token VALID" in output
+    assert "Verdict: READY" in output
+    assert "Verdict: KEYRING TIMED OUT" not in output
+
+
+def test_auth_doctor_keeps_expired_file_verdict_over_keyring_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _doctor_setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("SLIDESMITH_KEYRING_TIMEOUT", "0")
+    FileSessionStore().save(
+        "gws-default", _token(expires_at=time.time() - 60)
+    )
+
+    cli.main(["auth", "doctor"])
+
+    output = capsys.readouterr().out
+    assert "File store: PRESENT" in output
+    assert "token EXPIRED" in output
+    assert "Verdict: TOKEN EXPIRED" in output
+    assert "Verdict: KEYRING TIMED OUT" not in output
+
+
+def test_auth_doctor_skips_keyring_when_file_store_is_selected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _doctor_setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("SLIDESMITH_TOKEN_STORE", "file")
+
+    cli.main(["auth", "doctor"])
+
+    output = capsys.readouterr().out
+    assert "Keyring session store: SKIPPED (SLIDESMITH_TOKEN_STORE=file)" in output
+    assert "Keyring: DENIED OR BROKEN" not in output
 
 
 def test_auth_doctor_reports_expired_file_token(

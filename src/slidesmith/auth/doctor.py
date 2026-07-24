@@ -25,13 +25,19 @@ from slidesmith.auth.discovery import (
 from slidesmith.auth.stores import (
     FileSessionStore,
     KeyringSessionStore,
+    KeyringTimeoutError,
     SessionToken,
     _DEFAULT_PROFILE,
     _KEYRING_SERVICE,
+    _call_keyring,
 )
 
 ClientDiscovery = Callable[[], OAuthClientCredentials | None]
 GogcliDiagnostic = Callable[[], GogcliDiscoveryResult]
+_KEYRING_TIMEOUT_REMEDIATION = (
+    "Remediation: run `slidesmith auth doctor` once in an interactive terminal and "
+    "click 'Always Allow', or set SLIDESMITH_TOKEN_STORE=file."
+)
 
 
 def _inspect_session_payload(payload: Any) -> tuple[str, SessionToken | None]:
@@ -143,6 +149,12 @@ def auth_doctor_lines(
             "On macOS, the first read by a new process can trigger a Keychain "
             "authorization prompt; choose 'Always Allow'."
         )
+        if gogcli_result.keyring_timed_out:
+            lines.append(
+                "The keyring read timed out, likely because a macOS Keychain "
+                "authorization prompt is pending."
+            )
+            lines.append(_KEYRING_TIMEOUT_REMEDIATION)
         lines.append(
             "If gog uses a custom keyring service, set "
             "GOG_KEYRING_SERVICE_NAME to the same value."
@@ -188,20 +200,37 @@ def auth_doctor_lines(
     lines.append(f"Session profile: {profile_name}")
 
     keyring_error: Exception | None = None
+    keyring_timed_out = False
     keyring_status = "absent"
     keyring_token: SessionToken | None = None
-    try:
-        raw = KeyringSessionStore._backend().get_password(
-            _KEYRING_SERVICE, profile_name
+    if os.environ.get("SLIDESMITH_TOKEN_STORE", "").strip() == "file":
+        keyring_status = "skipped"
+        lines.append(
+            "Keyring session store: SKIPPED (SLIDESMITH_TOKEN_STORE=file)"
         )
-        keyring_status, keyring_token = _inspect_session_payload(raw)
-        detail = keyring_status.upper()
-        if keyring_token is not None:
-            detail += f"; expires {_format_expiry(keyring_token)}"
-        lines.append(f"Keyring: READABLE; token {detail}")
-    except Exception as exc:
-        keyring_error = exc
-        lines.append(f"Keyring: DENIED OR BROKEN; error: {exc!r}")
+    else:
+        try:
+            raw = _call_keyring(
+                lambda: KeyringSessionStore._backend().get_password(
+                    _KEYRING_SERVICE, profile_name
+                ),
+                key=(_KEYRING_SERVICE, profile_name),
+            )
+            keyring_status, keyring_token = _inspect_session_payload(raw)
+            detail = keyring_status.upper()
+            if keyring_token is not None:
+                detail += f"; expires {_format_expiry(keyring_token)}"
+            lines.append(f"Keyring: READABLE; token {detail}")
+        except KeyringTimeoutError:
+            keyring_timed_out = True
+            lines.append(
+                "Keyring: TIMED OUT (likely awaiting a macOS Keychain "
+                "authorization prompt)"
+            )
+            lines.append(_KEYRING_TIMEOUT_REMEDIATION)
+        except Exception as exc:
+            keyring_error = exc
+            lines.append(f"Keyring: DENIED OR BROKEN; error: {exc!r}")
 
     file_store = FileSessionStore()
     file_status = "absent"
@@ -299,6 +328,9 @@ def auth_doctor_lines(
     elif "expired" in token_statuses:
         verdict = "TOKEN EXPIRED"
         next_command = "slidesmith auth login"
+    elif keyring_timed_out:
+        verdict = "KEYRING TIMED OUT"
+        next_command = _KEYRING_TIMEOUT_REMEDIATION.removeprefix("Remediation: ")
     elif keyring_error is not None:
         verdict = "KEYRING DENIED OR BROKEN"
         next_command = "slidesmith auth login"

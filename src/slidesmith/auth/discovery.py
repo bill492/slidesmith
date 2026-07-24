@@ -8,7 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from slidesmith.auth.stores import KeyringSessionStore
+from slidesmith.auth.stores import (
+    KeyringSessionStore,
+    KeyringTimeoutError,
+    _call_keyring,
+)
 from slidesmith.engine.json_utils import read_json
 
 
@@ -37,6 +41,7 @@ class GogcliDiscoveryResult:
     keyring_service: str = ""
     keyring_key: str = ""
     ambiguous_paths: tuple[Path, ...] = ()
+    keyring_timed_out: bool = False
 
 
 def _parse_oauth_client_json(data: dict[str, Any]) -> tuple[str, str] | None:
@@ -166,16 +171,31 @@ def _gogcli_keyring_service() -> str:
     return os.environ.get("GOG_KEYRING_SERVICE_NAME", "").strip() or "gogcli"
 
 
-def _read_gogcli_keyring_secret(service: str, key: str) -> str | None:
+def _read_gogcli_keyring_secret(
+    service: str,
+    key: str,
+    *,
+    include_timeout: bool = False,
+) -> str | None | tuple[str | None, bool]:
     """Read a gogcli secret without allowing keyring failures to escape."""
+    timed_out = False
     try:
-        raw = KeyringSessionStore._backend().get_password(service, key)
+        raw = _call_keyring(
+            lambda: KeyringSessionStore._backend().get_password(service, key)
+        )
+    except KeyringTimeoutError:
+        timed_out = True
+        secret = None
     except Exception:
-        return None
-    if not isinstance(raw, str):
-        return None
-    secret = raw.strip()
-    return secret or None
+        secret = None
+    else:
+        if not isinstance(raw, str):
+            secret = None
+        else:
+            secret = raw.strip() or None
+    if include_timeout:
+        return secret, timed_out
+    return secret
 
 
 def _gogcli_file_result(
@@ -204,13 +224,18 @@ def _gogcli_file_result(
     normalized_name = client_name.strip().lower()
     key = f"client/{normalized_name}/client-secret"
     service = _gogcli_keyring_service()
-    secret = _read_gogcli_keyring_secret(service, key)
+    secret_result = _read_gogcli_keyring_secret(
+        service, key, include_timeout=True
+    )
+    assert isinstance(secret_result, tuple)
+    secret, keyring_timed_out = secret_result
     if secret is None:
         return GogcliDiscoveryResult(
             status="keyring-unreadable",
             client_path=path,
             keyring_service=service,
             keyring_key=key,
+            keyring_timed_out=keyring_timed_out,
         )
     return GogcliDiscoveryResult(
         status="found",
