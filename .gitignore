@@ -10,3 +10,4 @@ decks/
 outputs/
 docs/local/
 uv.lock
+.orchestration/
