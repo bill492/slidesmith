@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 from slidesmith.auth.stores import (
     KeyringSessionStore,
+    KeyringSkippedError,
     KeyringTimeoutError,
     _call_keyring,
 )
@@ -183,6 +184,8 @@ def _read_gogcli_keyring_secret(
         raw = _call_keyring(
             lambda: KeyringSessionStore._backend().get_password(service, key)
         )
+    except KeyringSkippedError:
+        secret = None
     except KeyringTimeoutError:
         timed_out = True
         secret = None

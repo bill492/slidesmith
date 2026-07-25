@@ -14,6 +14,13 @@ agent-legible: name the command/flag and what an operator can now do.
 
 ## [Unreleased]
 
+### Changed
+
+- Headless Keychain fallback warnings now tell agents to set
+  `SLIDESMITH_KEYRING_TIMEOUT=0` and humans to approve Keychain interactively;
+  `auth doctor` distinguishes a deliberate keyring skip from a timed-out
+  Keychain operation.
+
 ### Added
 
 - `SLIDESMITH_KEYRING_TIMEOUT=<float-seconds>` lets operators bound OS-keyring

@@ -28,7 +28,7 @@ from slidesmith.credentials import (
     OAuthClientCredentials,
     SessionToken,
 )
-from slidesmith.auth.stores import KeyringTimeoutError
+from slidesmith.auth.stores import KeyringSkippedError, KeyringTimeoutError
 
 
 class MemoryKeyring:
@@ -749,9 +749,10 @@ def test_keyring_timeout_nonpositive_skips_backend_call(
     monkeypatch.setattr(credentials, "_keyring", CountingKeyring())
     monkeypatch.setenv("SLIDESMITH_KEYRING_TIMEOUT", timeout)
 
-    with pytest.raises(KeyringTimeoutError):
+    with pytest.raises(KeyringSkippedError) as exc_info:
         KeyringSessionStore().load("default")
 
+    assert isinstance(exc_info.value, KeyringTimeoutError)
     assert calls == 0
 
 
@@ -791,7 +792,83 @@ def test_fallback_session_store_uses_file_after_keyring_timeout(
     store = FallbackSessionStore(TimedOutStore(), file_store)
 
     assert store.load("default") == token
-    assert "using file session store" in capsys.readouterr().err
+    assert store.load("default") == token
+    assert capsys.readouterr().err.splitlines() == [
+        "warning: OS keyring timed out (a macOS Keychain approval prompt is likely pending); continuing with the file session store - this run is fine.",
+        "warning: until fixed, every run waits for the keyring timeout (5s default per keyring operation). Agent fix: set SLIDESMITH_KEYRING_TIMEOUT=0. Human fix (keeps Keychain): run `slidesmith auth doctor` in an interactive terminal and click 'Always Allow'.",
+    ]
+
+
+def test_fallback_session_store_silently_uses_file_when_keyring_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    token = _token()
+    monkeypatch.setenv("SLIDESMITH_KEYRING_TIMEOUT", "0")
+    file_store = FileSessionStore(tmp_path / "session.json")
+    file_store.save("default", token)
+
+    assert FallbackSessionStore(KeyringSessionStore(), file_store).load("default") == token
+    assert capsys.readouterr().err == ""
+
+
+def test_fallback_session_store_timeout_warning_follows_skipped_keyring(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    token = _token()
+
+    class SkippedThenTimedOutStore:
+        def __init__(self) -> None:
+            self.load_calls = 0
+
+        def load(self, _profile_name: str) -> SessionToken | None:
+            self.load_calls += 1
+            if self.load_calls == 1:
+                raise KeyringSkippedError()
+            raise KeyringTimeoutError()
+
+        def save(self, _profile_name: str, _token: SessionToken) -> None:
+            raise AssertionError("save should not be called")
+
+        def delete(self, _profile_name: str) -> None:
+            raise AssertionError("delete should not be called")
+
+    file_store = FileSessionStore(tmp_path / "session.json")
+    file_store.save("default", token)
+    store = FallbackSessionStore(SkippedThenTimedOutStore(), file_store)
+
+    assert store.load("default") == token
+    assert capsys.readouterr().err == ""
+
+    assert store.load("default") == token
+    assert capsys.readouterr().err.splitlines() == [
+        "warning: OS keyring timed out (a macOS Keychain approval prompt is likely pending); continuing with the file session store - this run is fine.",
+        "warning: until fixed, every run waits for the keyring timeout (5s default per keyring operation). Agent fix: set SLIDESMITH_KEYRING_TIMEOUT=0. Human fix (keeps Keychain): run `slidesmith auth doctor` in an interactive terminal and click 'Always Allow'.",
+    ]
+
+
+def test_fallback_session_store_keeps_generic_non_timeout_warning(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    token = _token()
+
+    class BrokenStore:
+        def load(self, _profile_name: str) -> SessionToken | None:
+            raise RuntimeError("keyring broken")
+
+        def save(self, _profile_name: str, _token: SessionToken) -> None:
+            raise RuntimeError("keyring broken")
+
+        def delete(self, _profile_name: str) -> None:
+            raise RuntimeError("keyring broken")
+
+    file_store = FileSessionStore(tmp_path / "session.json")
+    file_store.save("default", token)
+
+    assert FallbackSessionStore(BrokenStore(), file_store).load("default") == token
+    assert capsys.readouterr().err == (
+        "warning: keyring unavailable (RuntimeError('keyring broken')); "
+        "using file session store\n"
+    )
 
 
 def test_empty_keyring_falls_back_to_file_and_repairs_keyring(
@@ -1160,7 +1237,7 @@ def test_auth_doctor_shows_keyring_error_and_recovery_command(
     assert "Next command: slidesmith auth login" in output
 
 
-def test_auth_doctor_reports_keyring_timeout_remediation(
+def test_auth_doctor_reports_deliberately_skipped_keyring(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1171,13 +1248,8 @@ def test_auth_doctor_reports_keyring_timeout_remediation(
     cli.main(["auth", "doctor"])
 
     output = capsys.readouterr().out
-    assert (
-        "Keyring: TIMED OUT (likely awaiting a macOS Keychain authorization prompt)"
-        in output
-    )
-    assert "run `slidesmith auth doctor` once in an interactive terminal" in output
-    assert "set SLIDESMITH_TOKEN_STORE=file" in output
-    assert "Verdict: KEYRING TIMED OUT" in output
+    assert "Keyring: SKIPPED (SLIDESMITH_KEYRING_TIMEOUT=0)" in output
+    assert "Verdict: KEYRING TIMED OUT" not in output
     assert "Verdict: KEYRING DENIED OR BROKEN" not in output
 
 

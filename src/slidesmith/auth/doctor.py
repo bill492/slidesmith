@@ -25,6 +25,7 @@ from slidesmith.auth.discovery import (
 from slidesmith.auth.stores import (
     FileSessionStore,
     KeyringSessionStore,
+    KeyringSkippedError,
     KeyringTimeoutError,
     SessionToken,
     _DEFAULT_PROFILE,
@@ -225,6 +226,9 @@ def auth_doctor_lines(
             if keyring_token is not None:
                 detail += f"; expires {_format_expiry(keyring_token)}"
             lines.append(f"Keyring: READABLE; token {detail}")
+        except KeyringSkippedError:
+            keyring_status = "skipped"
+            lines.append("Keyring: SKIPPED (SLIDESMITH_KEYRING_TIMEOUT=0)")
         except KeyringTimeoutError:
             keyring_timed_out = True
             lines.append(

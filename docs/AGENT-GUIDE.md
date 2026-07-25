@@ -1364,8 +1364,11 @@ disable gogcli client-secret discovery's bounded OS-keyring read. Use
 `SLIDESMITH_KEYRING_TIMEOUT=0` as the global “no Keychain” switch. Set
 `SLIDESMITH_TOKEN_STORE=keyring` to force Keychain session-store reads. With no
 setting, Slidesmith tries Keychain and, on an exception or timeout, emits one
-stderr notice and falls back to the file. If the doctor says `CREDENTIAL ABSENT`,
-configure a gws or gogcli OAuth client first. For `GOGCLI CLIENT SECRET
+stderr notice naming the agent fix (`SLIDESMITH_KEYRING_TIMEOUT=0`) and the human
+fix (run `slidesmith auth doctor` interactively and click 'Always Allow'), then
+falls back to the file; `SLIDESMITH_KEYRING_TIMEOUT=0` is silent by design. If
+the doctor says `CREDENTIAL ABSENT`, configure a gws or gogcli OAuth client
+first. For `GOGCLI CLIENT SECRET
 UNREADABLE`, use the printed keyring guidance or a bare token; for `GOGCLI
 CLIENT AMBIGUOUS`, disambiguate the named files. If it says `TOKEN EXPIRED`,
 `SESSION TOKEN ABSENT`, `KEYRING TIMED OUT`, or `KEYRING DENIED OR BROKEN`, run

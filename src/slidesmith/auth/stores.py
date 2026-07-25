@@ -46,6 +46,15 @@ class KeyringTimeoutError(RuntimeError):
         super().__init__(_KEYRING_TIMEOUT_MESSAGE)
 
 
+class KeyringSkippedError(KeyringTimeoutError):
+    """OS keyring access was deliberately disabled for this process."""
+
+    def __init__(self) -> None:
+        RuntimeError.__init__(
+            self, "keyring access disabled by SLIDESMITH_KEYRING_TIMEOUT"
+        )
+
+
 def _warn_invalid_keyring_timeout(value: str) -> None:
     with _invalid_timeout_warnings_lock:
         if value in _invalid_timeout_warnings:
@@ -84,7 +93,7 @@ def _call_keyring(
     """Run one keyring operation without unbounded headless blocking."""
     timeout = _keyring_timeout()
     if timeout is not None and timeout <= 0:
-        raise KeyringTimeoutError()
+        raise KeyringSkippedError()
 
     lock: threading.Lock | None = None
     deadline = time.monotonic() + timeout if timeout is not None else None
@@ -381,7 +390,24 @@ class FallbackSessionStore:
     def _notice(self, exc: Exception) -> None:
         if self._notice_printed:
             return
+        if isinstance(exc, KeyringSkippedError):
+            return
         self._notice_printed = True
+        if isinstance(exc, KeyringTimeoutError):
+            print(
+                "warning: OS keyring timed out (a macOS Keychain approval prompt is "
+                "likely pending); continuing with the file session store - this run is fine.",
+                file=sys.stderr,
+            )
+            print(
+                "warning: until fixed, every run waits for the keyring timeout (5s "
+                "default per keyring operation). Agent fix: set "
+                "SLIDESMITH_KEYRING_TIMEOUT=0. Human fix (keeps Keychain): run "
+                "`slidesmith auth doctor` in an interactive terminal and click "
+                "'Always Allow'.",
+                file=sys.stderr,
+            )
+            return
         print(
             f"warning: keyring unavailable ({exc!r}); using file session store",
             file=sys.stderr,
