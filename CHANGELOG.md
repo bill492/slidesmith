@@ -14,6 +14,16 @@ agent-legible: name the command/flag and what an operator can now do.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.10.0] — 2026-07-25 — Headless keyring guard
+
+Driven by a live headless hang report, this release prevents macOS Keychain
+prompts from blocking headless runs indefinitely, gives agents bounded,
+actionable degradation, and reconciles dual session stores by issuance rather
+than expiry. The behavior was hardened across nine adversarial review rounds.
+Tag `stage-25`. 1039 tests.
+
 ### Changed
 
 - Headless Keychain fallback warnings now tell agents to set
@@ -34,6 +44,18 @@ agent-legible: name the command/flag and what an operator can now do.
   headless macOS Keychain authorization prompts: non-interactive keyring calls
   time out after 5 seconds and session-token operations fall back to the file
   store.
+- Session-store reconciliation now orders persisted `issued_at` stamps rather
+  than token expiry, so a stale token cannot overwrite a newer one after a
+  partial dual-store save failure. Legacy mixed-type sessions fail safe and
+  are never mirrored when their ordering is ambiguous.
+- Malformed session timestamps — including string, boolean, non-finite, and
+  oversized `issued_at` values — now degrade to unstamped metadata instead of
+  aborting authentication loading; malformed file expiry values likewise
+  cannot defeat a valid Keychain session.
+- `slidesmith auth doctor` no longer recommends `SLIDESMITH_TOKEN_STORE=file`
+  for a timed-out gogcli client-secret lookup, because that setting only
+  controls the session store; its remediation now correctly directs humans to
+  authorize Keychain interactively.
 
 ## [0.9.1] — 2026-07-24 — Sequence-aware style planning
 
@@ -459,7 +481,8 @@ Tags `stage-1` … `stage-6`. The living-deck co-editing core.
 Descends from think41/extrasuite's extraslide (MIT — see `NOTICE`), heavily
 rewritten.
 
-[Unreleased]: https://github.com/unblocklabs-ai/slidesmith/compare/stage-24-sequence-aware-planning...HEAD
+[Unreleased]: https://github.com/unblocklabs-ai/slidesmith/compare/stage-25-headless-keyring-guard...HEAD
+[0.10.0]: https://github.com/unblocklabs-ai/slidesmith/releases/tag/stage-25-headless-keyring-guard
 [0.9.1]: https://github.com/unblocklabs-ai/slidesmith/releases/tag/stage-24-sequence-aware-planning
 [0.9.0]: https://github.com/unblocklabs-ai/slidesmith/releases/tag/stage-23-proof-receipts
 [0.8.0]: https://github.com/unblocklabs-ai/slidesmith/releases/tag/stage-22-agent-native-authoring
