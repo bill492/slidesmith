@@ -16,6 +16,32 @@ agent-legible: name the command/flag and what an operator can now do.
 
 _Nothing yet._
 
+## [0.10.1] — 2026-10-06 — Text spill QA
+
+Geometry QA now checks for estimated text collisions beyond separated sibling
+frames, rather than relying only on their authored rectangles. Paragraph
+indentation is respected and repeated text measurement is avoided. The test
+suite was audited to remove redundant checks and strengthen the copy-style
+target assertion. Measurements remain approximate: inspect Google's rendered
+thumbnails even when local QA reports no findings. Tag `stage-26`. 1039 tests.
+
+### Fixed
+
+- `slidesmith check` and push preflight now report `OVERLAP` when estimated
+  text lines spill into a separated sibling text frame, including cases where
+  the short-title tolerance suppresses `TEXT_OVERFLOW`.
+- Paragraph start/end indents, independent first-line offsets, and RTL
+  direction now position estimated text lines correctly, avoiding false
+  collision and overflow warnings on indented text.
+- Spill QA reuses line geometry across sibling comparisons. A clean synthetic
+  100-cell slide required 200 measurements instead of 10,000 and linted about
+  7.3 times faster; real-deck timings may differ.
+
+### Changed
+
+- The no-findings message now says "No local layout findings; inspect Google
+  renders." instead of claiming that QA is clean.
+
 ## [0.10.0] — 2026-07-25 — Headless keyring guard
 
 Driven by a live headless hang report, this release prevents macOS Keychain
@@ -481,7 +507,8 @@ Tags `stage-1` … `stage-6`. The living-deck co-editing core.
 Descends from think41/extrasuite's extraslide (MIT — see `NOTICE`), heavily
 rewritten.
 
-[Unreleased]: https://github.com/unblocklabs-ai/slidesmith/compare/stage-25-headless-keyring-guard...HEAD
+[Unreleased]: https://github.com/unblocklabs-ai/slidesmith/compare/stage-26-text-spill-qa...HEAD
+[0.10.1]: https://github.com/unblocklabs-ai/slidesmith/releases/tag/stage-26-text-spill-qa
 [0.10.0]: https://github.com/unblocklabs-ai/slidesmith/releases/tag/stage-25-headless-keyring-guard
 [0.9.1]: https://github.com/unblocklabs-ai/slidesmith/releases/tag/stage-24-sequence-aware-planning
 [0.9.0]: https://github.com/unblocklabs-ai/slidesmith/releases/tag/stage-23-proof-receipts

@@ -206,6 +206,134 @@ def test_overlap_flags_sibling_leaves_over_threshold(qa_folder: Path) -> None:
     assert findings[0].suggested_fix
 
 
+@pytest.mark.parametrize(
+    (
+        "headline",
+        "subtitle_y",
+        "subtitle_alignment",
+        "reverse_order",
+        "headline_paragraph_classes",
+        "collision",
+    ),
+    [
+        (
+            "Long headlines can collide with the subtitle below",
+            108,
+            "left",
+            False,
+            "",
+            True,
+        ),
+        (
+            "Long headlines can collide with the subtitle below",
+            108,
+            "left",
+            True,
+            "",
+            True,
+        ),
+        ("Short headline", 108, "left", False, "", False),
+        (
+            "Long headlines can collide with the subtitle below",
+            140,
+            "left",
+            False,
+            "",
+            False,
+        ),
+        (
+            "Long headlines can collide with the subtitle below",
+            108,
+            "right",
+            False,
+            "",
+            False,
+        ),
+        (
+            "Long headlines can collide with the subtitle below",
+            68,
+            "left",
+            False,
+            "",
+            False,
+        ),
+        (
+            "Long headlines can collide with the subtitle below",
+            108,
+            "left",
+            False,
+            "indent-start-90",
+            False,
+        ),
+        (
+            "Long headlines can collide with the subtitle below",
+            108,
+            "right",
+            False,
+            "indent-start-90 dir-rtl",
+            False,
+        ),
+        (
+            "Long headlines can collide with the subtitle below",
+            108,
+            "left",
+            False,
+            "indent-first-90",
+            True,
+        ),
+        (
+            "Long headlines can collide with subtitles when indents are set",
+            108,
+            "left",
+            False,
+            "indent-start-90 indent-first-90",
+            False,
+        ),
+    ],
+    ids=[
+        "spill",
+        "spill-reversed",
+        "fits",
+        "empty-space",
+        "beside-spill",
+        "contained",
+        "indented",
+        "indented-rtl",
+        "first-line-indent",
+        "first-line-offset",
+    ],
+)
+def test_check_detects_estimated_text_spill_collision(
+    qa_folder: Path,
+    headline: str,
+    subtitle_y: int,
+    subtitle_alignment: str,
+    reverse_order: bool,
+    headline_paragraph_classes: str,
+    collision: bool,
+) -> None:
+    title = (
+        '<TextBox id="headline" x="42" y="58" w="630" h="48" '
+        'class="font-family-arial bold text-size-30 leading-100">'
+        f'<P class="{headline_paragraph_classes}">{headline}</P></TextBox>'
+    )
+    subtitle = (
+        f'<TextBox id="subtitle" x="42" y="{subtitle_y}" w="625" h="34" '
+        f'class="font-family-arial text-size-18 leading-100 text-align-{subtitle_alignment}">'
+        "<P>Subtitle</P></TextBox>"
+    )
+    _replace_slides(qa_folder, subtitle + title if reverse_order else title + subtitle)
+
+    output: list[str] = []
+    assert check_folder(qa_folder, strict=True, output=output.append) == int(collision)
+    if collision:
+        assert any(
+            "OVERLAP" in line and "Estimated text collision" in line for line in output
+        )
+    # Keep the short-title uncertainty guard: harmless spill alone isn't actionable.
+    assert not any("TEXT_OVERFLOW" in line for line in output)
+
+
 def test_preflight_uses_contain_image_effective_box_for_overlap(
     qa_folder: Path,
 ) -> None:
@@ -435,7 +563,7 @@ def test_text_overflow_allows_text_that_fits(qa_folder: Path) -> None:
 
 
 def test_text_measurement_calibration_corpus(tmp_path: Path) -> None:
-    """Pin the geometry estimator against a small visual-ground-truth table."""
+    """Exercise local geometry estimator contracts, not Google-rendered ground truth."""
     data = json.loads(GOLDEN.read_text(encoding="utf-8"))
     cases = [
         (
@@ -544,7 +672,6 @@ def test_text_measurement_calibration_corpus(tmp_path: Path) -> None:
         ),
     ]
 
-    verdict_vector: list[tuple[str, ...]] = []
     for name, body, style, expected in cases:
         case_root = tmp_path / name
         case_root.mkdir()
@@ -562,19 +689,7 @@ def test_text_measurement_calibration_corpus(tmp_path: Path) -> None:
             )
 
         verdict = tuple(sorted(finding.rule for finding in lint_folder(folder)))
-        verdict_vector.append(verdict)
         assert verdict == expected, name
-
-    assert verdict_vector == [
-        (),
-        ("TEXT_OVERFLOW",),
-        ("TEXT_OVERFLOW",),
-        (),
-        ("OVERLAP",),
-        (),
-        ("TEXT_OVERFLOW",),
-        ("TEXT_OVERFLOW",),
-    ]
 
 
 def test_pending_text_edit_deactivates_pull_time_autofit(qa_folder: Path) -> None:
@@ -827,7 +942,7 @@ def test_check_folder_strict_exit_and_clean_bill(
 ) -> None:
     output: list[str] = []
     assert check_folder(qa_folder, strict=True, output=output.append) == 0
-    assert output == ["QA clean: no issues found."]
+    assert output == ["No local layout findings; inspect Google renders."]
 
     _replace_slides(
         qa_folder,
@@ -1399,7 +1514,7 @@ def test_cli_no_thumbnails_uses_no_auth_or_transport(
 
     cli.main(["check", str(qa_folder), "--no-thumbnails"])
 
-    assert "no issues found" in capsys.readouterr().out
+    assert "No local layout findings; inspect Google renders." in capsys.readouterr().out
     assert not (qa_folder / ".qa").exists()
 
 

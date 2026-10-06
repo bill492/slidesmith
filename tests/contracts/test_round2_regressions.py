@@ -315,6 +315,12 @@ def test_copy_merges_pristine_and_edited_run_styles_on_new_text_ranges() -> None
         {"label": "label-google"},
         {"01": "slide-google"},
     )
+    (copied_id,) = [
+        request["createShape"]["objectId"]
+        for request in requests
+        if "createShape" in request
+    ]
+    assert copied_id != "label-google"
     updates = [
         request["updateTextStyle"]
         for request in requests
@@ -322,17 +328,17 @@ def test_copy_merges_pristine_and_edited_run_styles_on_new_text_ranges() -> None
     ]
     assert updates == [
         {
-            "objectId": updates[0]["objectId"],
+            "objectId": copied_id,
             "textRange": {"type": "FIXED_RANGE", "startIndex": 0, "endIndex": 3},
             "style": {"italic": True},
             "fields": "italic",
         },
         {
-            "objectId": updates[0]["objectId"],
+            "objectId": copied_id,
             "textRange": {"type": "FIXED_RANGE", "startIndex": 0, "endIndex": 6},
             "style": {"bold": True},
             "fields": "bold",
-        }
+        },
     ]
 
 

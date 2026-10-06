@@ -599,7 +599,7 @@ def print_report(
     active_count = len(findings) - accepted_count
     if baseline is None:
         if not findings:
-            output("QA clean: no issues found.")
+            output("No local layout findings; inspect Google renders.")
             return
 
         output(f"QA found {active_count} issue(s):")
@@ -1275,8 +1275,35 @@ def _text_ink_box(
     *,
     autofit_deactivated: bool = False,
 ) -> BoundingBox | None:
-    if not _is_text_element(element) or not any(element.paragraphs):
+    lines = _text_line_boxes(
+        element,
+        box,
+        raw_style,
+        text_measurer,
+        autofit_deactivated=autofit_deactivated,
+        cap_line_height=True,
+    )
+    if not lines:
         return None
+    left = min(line.x for line in lines)
+    top = min(line.y for line in lines)
+    right = max(line.x2 for line in lines)
+    bottom = max(line.y2 for line in lines)
+    return BoundingBox(left, top, right - left, bottom - top)
+
+
+def _text_line_boxes(
+    element: ParsedElement,
+    box: BoundingBox,
+    raw_style: dict[str, Any],
+    text_measurer: TextMeasurer | None,
+    *,
+    autofit_deactivated: bool = False,
+    cap_line_height: bool = False,
+) -> list[BoundingBox]:
+    """Estimate aligned line regions, not exact rendered glyph bounds."""
+    if not _is_text_element(element) or not any(element.paragraphs):
+        return []
     measurement = _measure_text_element(
         element,
         raw_style,
@@ -1291,7 +1318,7 @@ def _text_ink_box(
         or content_height <= 0
         or measurement.layout.max_line_width_pt <= 0
     ):
-        return None
+        return []
 
     paragraph_layouts = measurement.layout.paragraphs
     if not paragraph_layouts:
@@ -1312,52 +1339,57 @@ def _text_ink_box(
     else:
         vertical_offset = 0.0
 
-    ink_left: float | None = None
-    ink_top: float | None = None
-    ink_right: float | None = None
-    ink_bottom: float | None = None
+    paragraph_metrics = _paragraph_metrics(element, raw_style)
+    lines: list[BoundingBox] = []
     cursor_y = box.y + measurement.top_inset_pt + vertical_offset
     for paragraph_index, paragraph_layout in enumerate(paragraph_layouts):
         cursor_y += max(0.0, paragraph_layout.space_above_pt)
-        paragraph_alignment = _paragraph_alignment(
+        paragraph_alignment, right_to_left = _paragraph_placement(
             element,
             raw_style,
             paragraph_index,
         )
-        for line_width, line_height in zip(
-            paragraph_layout.line_widths_pt,
-            paragraph_layout.line_heights_pt,
-            strict=False,
+        metrics = paragraph_metrics[paragraph_index]
+        for line_index, (line_width, line_height) in enumerate(
+            zip(
+                paragraph_layout.line_widths_pt,
+                paragraph_layout.line_heights_pt,
+                strict=False,
+            )
         ):
-            line_width = min(content_width, max(0.0, line_width))
-            line_height = min(content_height, max(0.0, line_height))
+            # First-line indentation is an independent start offset, not
+            # an addition to the continuation-line indent.
+            start_indent = max(
+                0.0,
+                metrics.indent_first_line_pt
+                if line_index == 0
+                else metrics.indent_start_pt,
+            )
+            end_indent = max(0.0, metrics.indent_end_pt)
+            left_indent, right_indent = (
+                (end_indent, start_indent)
+                if right_to_left
+                else (start_indent, end_indent)
+            )
+            line_available_width = max(0.0, content_width - left_indent - right_indent)
+            line_width = min(line_available_width, max(0.0, line_width))
+            line_height = max(0.0, line_height)
+            if cap_line_height:
+                # Preserve the existing text-vs-shape measurement policy.
+                line_height = min(content_height, line_height)
             if line_width <= 0 or line_height <= 0:
                 cursor_y += max(0.0, line_height)
                 continue
-            line_x = box.x + measurement.left_inset_pt
+            line_x = box.x + measurement.left_inset_pt + left_indent
             if paragraph_alignment == "CENTER":
-                line_x += max(0.0, content_width - line_width) / 2.0
+                line_x += max(0.0, line_available_width - line_width) / 2.0
             elif paragraph_alignment == "END":
-                line_x += max(0.0, content_width - line_width)
-            line_y = cursor_y
-            ink_left = line_x if ink_left is None else min(ink_left, line_x)
-            ink_top = line_y if ink_top is None else min(ink_top, line_y)
-            ink_right = (
-                line_x + line_width
-                if ink_right is None
-                else max(ink_right, line_x + line_width)
-            )
-            ink_bottom = (
-                line_y + line_height
-                if ink_bottom is None
-                else max(ink_bottom, line_y + line_height)
-            )
+                line_x += max(0.0, line_available_width - line_width)
+            lines.append(BoundingBox(line_x, cursor_y, line_width, line_height))
             cursor_y += line_height
         cursor_y += max(0.0, paragraph_layout.space_below_pt)
 
-    if ink_left is None or ink_top is None or ink_right is None or ink_bottom is None:
-        return None
-    return BoundingBox(ink_left, ink_top, ink_right - ink_left, ink_bottom - ink_top)
+    return lines
 
 
 def _content_alignment(element: ParsedElement, raw_style: dict[str, Any]) -> str:
@@ -1367,11 +1399,11 @@ def _content_alignment(element: ParsedElement, raw_style: dict[str, Any]) -> str
     return str(raw_style.get("contentAlignment", "")).upper()
 
 
-def _paragraph_alignment(
+def _paragraph_placement(
     element: ParsedElement,
     raw_style: dict[str, Any],
     paragraph_index: int,
-) -> str:
+) -> tuple[str, bool]:
     paragraph_style = (
         element.paragraph_styles[paragraph_index].paragraph_style
         if paragraph_index < len(element.paragraph_styles)
@@ -1402,21 +1434,18 @@ def _paragraph_alignment(
     if alignment not in {"START", "CENTER", "END"}:
         alignment = "START"
 
-    direction = (
-        paragraph_style.direction
-        if paragraph_style is not None
-        else None
-    )
+    direction = paragraph_style.direction if paragraph_style is not None else None
     if not direction and element.styles and element.styles.paragraph_style:
         direction = element.styles.paragraph_style.direction
     if not direction and isinstance(raw_para_style, dict):
         direction = raw_para_style.get("direction")
-    if str(direction or "").upper() == "RIGHT_TO_LEFT":
+    right_to_left = str(direction or "").upper() == "RIGHT_TO_LEFT"
+    if right_to_left:
         if alignment == "START":
-            return "END"
-        if alignment == "END":
-            return "START"
-    return alignment
+            alignment = "END"
+        elif alignment == "END":
+            alignment = "START"
+    return alignment, right_to_left
 
 
 def _overlap_check_boxes(
@@ -1471,6 +1500,20 @@ def _find_overlaps(
 ) -> list[Finding]:
     findings: list[Finding] = []
     autofit_invalidated_instances = autofit_invalidated_instances or set()
+    line_boxes: dict[int, list[BoundingBox]] = {}
+
+    def text_lines(element: ParsedElement, box: BoundingBox) -> list[BoundingBox]:
+        instance = id(element)
+        if instance not in line_boxes:
+            line_boxes[instance] = _text_line_boxes(
+                element,
+                box,
+                _raw_element_style(element, styles),
+                text_measurer,
+                autofit_deactivated=instance in autofit_invalidated_instances,
+            )
+        return line_boxes[instance]
+
     # Divider lines intentionally cross other content. Treating their bounding
     # boxes as ordinary shapes produces noisy overlap findings; filled
     # rectangles are deliberately left in the set so their actual ink overlap
@@ -1493,33 +1536,53 @@ def _find_overlaps(
                 second_box, slide_area
             ):
                 continue
-            # Text-vs-text remains raw-bounds conservative: two text frames
-            # may be intentionally layered even when their glyphs are sparse.
-            # Against a non-text sibling, use estimated ink so an empty half of
-            # a large text frame cannot report a visual overlap.
-            first_check_box, second_check_box = _overlap_check_boxes(
-                first,
-                first_box,
-                second,
-                second_box,
-                _raw_element_style(first, styles),
-                _raw_element_style(second, styles),
-                text_measurer,
-                autofit_invalidated_instances,
+            text_spill = (
+                _is_text_element(first)
+                and _is_text_element(second)
+                and _intersection_area(first_box, second_box) == 0
             )
-            if first_check_box is None or second_check_box is None:
-                continue
-            if first_check_box.contains(
-                second_check_box, threshold=OVERLAP_CONTAINMENT_THRESHOLD
-            ) or second_check_box.contains(
-                first_check_box, threshold=OVERLAP_CONTAINMENT_THRESHOLD
-            ):
-                continue
-            intersection = _intersection_area(first_check_box, second_check_box)
-            smaller_area = min(first_check_box.area, second_check_box.area)
-            if smaller_area <= 0:
-                continue
-            if intersection / smaller_area <= OVERLAP_THRESHOLD:
+            if text_spill:
+                # Disjoint frames can still collide when Google paints text
+                # outside them. Check actual estimated lines, not their union,
+                # to avoid treating empty space beside a short line as text.
+                first_lines = text_lines(first, first_box)
+                second_lines = text_lines(second, second_box)
+                overlap_ratio = max(
+                    (
+                        _intersection_area(first_line, second_line)
+                        / min(first_line.area, second_line.area)
+                        for first_line in first_lines
+                        for second_line in second_lines
+                    ),
+                    default=0.0,
+                )
+            else:
+                # Keep the existing frame/containment policy for overlapping
+                # text frames and estimated ink for text-vs-non-text pairs.
+                first_check_box, second_check_box = _overlap_check_boxes(
+                    first,
+                    first_box,
+                    second,
+                    second_box,
+                    _raw_element_style(first, styles),
+                    _raw_element_style(second, styles),
+                    text_measurer,
+                    autofit_invalidated_instances,
+                )
+                if first_check_box is None or second_check_box is None:
+                    continue
+                if first_check_box.contains(
+                    second_check_box, threshold=OVERLAP_CONTAINMENT_THRESHOLD
+                ) or second_check_box.contains(
+                    first_check_box, threshold=OVERLAP_CONTAINMENT_THRESHOLD
+                ):
+                    continue
+                intersection = _intersection_area(first_check_box, second_check_box)
+                smaller_area = min(first_check_box.area, second_check_box.area)
+                if smaller_area <= 0:
+                    continue
+                overlap_ratio = intersection / smaller_area
+            if overlap_ratio <= OVERLAP_THRESHOLD:
                 continue
             ids = (first.clean_id, second.clean_id)
             findings.append(
@@ -1530,8 +1593,11 @@ def _find_overlaps(
                     slide_number=slide_number,
                     slide_id=slide_id,
                     description=(
-                        f"Sibling elements {ids[0]} and {ids[1]} overlap by "
-                        f"{intersection / smaller_area:.0%} of the smaller element."
+                        f"Estimated text collision: {ids[0]} and {ids[1]} may overlap "
+                        "because text spills outside its frame (approximate measurement)."
+                        if text_spill
+                        else f"Sibling elements {ids[0]} and {ids[1]} overlap by "
+                        f"{overlap_ratio:.0%} of the smaller element."
                     ),
                     suggested_fix=(
                         "Move or resize one element to leave intentional spacing "

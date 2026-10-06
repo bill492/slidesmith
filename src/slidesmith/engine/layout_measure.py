@@ -204,22 +204,21 @@ class ApproximateTextMeasurer:
             (run.font_size_pt for run in runs if run.font_size_pt > 0),
             default=12.0,
         )
-        first_line = True
+        # Google defines first-line indentation from the content edge,
+        # independently of the continuation-line indentStart.
         line_width_limit = max(
             0.01,
             available_width
-            - max(0.0, paragraph.indent_start_pt)
             - max(0.0, paragraph.indent_end_pt)
-                - (max(0.0, paragraph.indent_first_line_pt) if first_line else 0.0),
+            - max(0.0, paragraph.indent_first_line_pt),
         )
 
         def finish_line() -> None:
-            nonlocal line_width, line_font_size, has_content, first_line, line_width_limit
+            nonlocal line_width, line_font_size, has_content, line_width_limit
             lines.append((line_width, line_font_size or empty_line_font_size))
             line_width = 0.0
             line_font_size = 0.0
             has_content = False
-            first_line = False
             line_width_limit = max(
                 0.01,
                 available_width

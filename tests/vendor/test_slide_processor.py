@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pytest
 
 from slidesmith.engine.bounds import BoundingBox
@@ -446,32 +443,3 @@ class TestSlideProcessor:
         assert result["presentation_info"]["title"] == "Test Presentation"
         assert result["presentation_info"]["slideCount"] == 1
         assert len(result["slides"]) == 1
-
-
-class TestWithGoldenFile:
-    """Tests using actual presentation data if available."""
-
-    @pytest.fixture
-    def golden_presentation(self):
-        """Load golden file if available."""
-        golden_path = (
-            Path(__file__).parent.parent
-            / "output/1FDmkjjecAqRpNUQK8gAsFdCASXJ7zIR004FXppwdZbA/.raw/presentation.json"
-        )
-        if not golden_path.exists():
-            pytest.skip("Golden file not available")
-        return json.loads(golden_path.read_text())
-
-    def test_process_real_presentation(self, golden_presentation):
-        result = process_presentation(golden_presentation)
-
-        # Should have reasonable number of IDs
-        assert len(result["id_mapping"]) > 100
-
-        # Should have slides
-        assert len(result["slides"]) == 32
-
-        # Each slide should have content
-        for slide in result["slides"]:
-            assert slide["content"]
-            assert 'id="' in slide["content"]

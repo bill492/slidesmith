@@ -1188,10 +1188,20 @@ fixes:
   inset-subtracted content box.
 - `OVERLAP` uses raw sibling bounds for text-vs-text, but shrinks a text
   element to the union of its paragraph/run ink line-blocks for text-vs-non-text
-  pairs. Vertical content alignment and per-paragraph START/CENTER/END (with
-  RTL direction) are applied. `<Line>`, near-full-slide backgrounds, and
+  pairs. Vertical content alignment, paragraph indents (including the separate
+  first-line indent), and START/CENTER/END alignment with RTL direction are
+  applied. `<Line>`, near-full-slide backgrounds, and
   95%-containment cases remain exempt; thin filled rectangles are checked
   against the estimated ink.
+  Separated sibling text frames also check individual estimated text lines for
+  spill collisions (more than 15% of the smaller line region). These report
+  `OVERLAP` with an "Estimated text collision" description, even when the
+  short-title overflow tolerance would suppress `TEXT_OVERFLOW`. Empty space
+  beside a line and harmless spill without a text collision do not trigger this
+  additional check. It remains approximate and does not compare across groups.
+
+No local layout findings is not proof of visual correctness: inspect Google's
+rendered thumbnails even when the local check reports no findings.
 
 Only an explicit pull saves the offline findings snapshot to
 `.pristine/qa-baseline.json`; a post-push pristine refresh does not change that

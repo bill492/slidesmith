@@ -7,15 +7,17 @@ C4  Human and agent edit different properties of the same element; both survive.
 C5  Human and agent edit the same property; push aborts with a useful conflict.
 C6  Pull -> push -> pull is idempotent.
 
-C1/C2/C6 run offline against the golden fixture. C3-C5 need a live deck:
-set SLIDESMITH_LIVE_DECK=<presentationId> to enable.
+This module exercises offline materialization, diff planning, and style
+preservation. Materialization determinism is not full C6 proof. Revision locking
+and post-push no-op behavior are exercised in test_c5_revision_locking.py using
+simulated transport responses. These tests do not verify live Google behavior
+or rendered layout.
 """
 
 from __future__ import annotations
 
 import json
 import math
-import os
 import re
 import xml.etree.ElementTree as ET
 import zipfile
@@ -55,12 +57,6 @@ GOLDEN = (
     / "golden"
     / "simple_presentation"
     / "presentation.json"
-)
-
-LIVE_DECK = os.environ.get("SLIDESMITH_LIVE_DECK")
-live = pytest.mark.skipif(
-    not LIVE_DECK,
-    reason="set SLIDESMITH_LIVE_DECK=<presentationId> to run live contracts",
 )
 
 
@@ -980,27 +976,3 @@ def test_c6_materialize_is_deterministic(tmp_path: Path) -> None:
         assert (a / rel).read_text(encoding="utf-8") == (b / rel).read_text(
             encoding="utf-8"
         )
-
-
-def test_c6_noop_rewrite_still_diffs_to_zero(golden_folder: Path) -> None:
-    for sml in golden_folder.rglob("content.sml"):
-        if ".pristine" in sml.parts:
-            continue
-        sml.write_text(sml.read_text(encoding="utf-8"), encoding="utf-8")
-    assert diff_folder(golden_folder) == []
-
-
-@live
-def test_c3_text_edit_preserves_human_styling() -> None:
-    pytest.skip("TODO: live contract — pull, edit one word, push, re-pull, assert styles unchanged")
-
-
-@live
-def test_c4_disjoint_edits_both_survive() -> None:
-    pytest.skip("TODO: live contract — agent moves element while human recolors it; both persist")
-
-
-@live
-@pytest.mark.xfail(reason="requires revision locking (writeControl) — not yet implemented")
-def test_c5_same_property_conflict_aborts_push() -> None:
-    pytest.skip("TODO: live contract — concurrent same-property edit must abort with conflict")
