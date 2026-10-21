@@ -16,6 +16,16 @@ agent-legible: name the command/flag and what an operator can now do.
 
 _Nothing yet._
 
+## [0.10.2] — 2026-10-20 — Updated CA bundle
+
+Require certifi 2026.10.19 or newer for authentication, transport, and image
+downloads so new installations receive the current CA bundle. Tag `stage-27`.
+1039 tests passed.
+
+### Changed
+
+- Raise the certifi dependency minimum to 2026.10.19.
+
 ## [0.10.1] — 2026-10-06 — Text spill QA
 
 Geometry QA now checks for estimated text collisions beyond separated sibling
@@ -507,7 +517,8 @@ Tags `stage-1` … `stage-6`. The living-deck co-editing core.
 Descends from think41/extrasuite's extraslide (MIT — see `NOTICE`), heavily
 rewritten.
 
-[Unreleased]: https://github.com/unblocklabs-ai/slidesmith/compare/stage-26-text-spill-qa...HEAD
+[Unreleased]: https://github.com/unblocklabs-ai/slidesmith/compare/stage-27-certifi-update...HEAD
+[0.10.2]: https://github.com/unblocklabs-ai/slidesmith/releases/tag/stage-27-certifi-update
 [0.10.1]: https://github.com/unblocklabs-ai/slidesmith/releases/tag/stage-26-text-spill-qa
 [0.10.0]: https://github.com/unblocklabs-ai/slidesmith/releases/tag/stage-25-headless-keyring-guard
 [0.9.1]: https://github.com/unblocklabs-ai/slidesmith/releases/tag/stage-24-sequence-aware-planning
